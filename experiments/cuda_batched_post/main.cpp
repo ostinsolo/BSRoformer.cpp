@@ -1,5 +1,6 @@
 #include "bs_roformer/inference.h"
 #include "bs_roformer/audio.h"
+#include "cpu_istft_reference.h"
 #include "cuda_post_pipeline.h"
 
 #include <chrono>

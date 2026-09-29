@@ -480,6 +480,8 @@ int main(int argc, char* argv[]) {
     bool bench = false;
     bool process_bench = false;
     bool live_stress = false;
+    bool gpu_post = false;
+    bool cpu_post = false;
     bool separate = false;
     int repeats = 3;
     int process_repeats = 1;
@@ -514,6 +516,10 @@ int main(int argc, char* argv[]) {
             process_bench = true;
         } else if (arg == "--live-stress") {
             live_stress = true;
+        } else if (arg == "--gpu-post") {
+            gpu_post = true;
+        } else if (arg == "--cpu-post") {
+            cpu_post = true;
         } else if (arg == "--stress-iters" && i + 1 < argc) {
             stress_iters = std::stoi(argv[++i]);
         } else if (arg == "--process-repeats" && i + 1 < argc) {
@@ -550,6 +556,8 @@ int main(int argc, char* argv[]) {
         const std::string model_path = positional[0];
         std::cerr << "Initializing BSRoformer..." << std::endl;
         Inference engine(model_path);
+        if (gpu_post) engine.SetUseCudaPost(true);
+        if (cpu_post) engine.SetUseCudaPost(false);
         if (!chunk_size_set) chunk_size = engine.GetDefaultChunkSize();
         if (!num_overlap_set) num_overlap = engine.GetDefaultNumOverlap();
 

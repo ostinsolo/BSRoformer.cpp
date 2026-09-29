@@ -75,6 +75,9 @@ public:
     const std::vector<int>& GetFreqIndices() const;
     const std::vector<int>& GetNumBandsPerFreq() const;
 
+    void SetUseCudaPost(bool enabled);
+    bool GetUseCudaPost() const;
+
     // Low-level chunk processing (public for testing)
     std::vector<std::vector<float>> ProcessChunk(const std::vector<float>& chunk_audio);
     std::vector<std::vector<float>> ProcessChunk(const std::vector<float>& chunk_audio,
@@ -108,6 +111,7 @@ private:
 
 private:
     std::unique_ptr<BSRoformer> model_;
+    bool use_cuda_post_ = false;
     struct CpuScratch;
 
     struct GraphState {
@@ -136,10 +140,14 @@ private:
         int n_frames = 0;
         
         std::vector<float> mask_output;       // Output from GPU
+        void* mask_device_ptr = nullptr;
+        size_t mask_device_bytes = 0;
+        bool mask_on_device = false;
         std::vector<std::vector<float>> final_audio;       // Result after ISTFT [stems][samples]
         double h2d_ms = 0.0;
         double graph_ms = 0.0;
         double d2h_ms = 0.0;
+        double mask_d2d_ms = 0.0;
     };
 
     // Helper to ensure graph is built for specific n_frames

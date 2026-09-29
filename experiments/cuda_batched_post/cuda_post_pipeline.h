@@ -49,6 +49,14 @@ struct CudaPostPipeline {
                     std::vector<std::vector<float>>& stems_interleaved_host,
                     CudaPostStageMs& timings);
 
+    bool run_mode_b_device_mask(float* mask_device,
+                                size_t mask_bytes,
+                                const std::vector<std::vector<float>>& stft_host,
+                                const std::vector<int>& freq_indices,
+                                const std::vector<int>& num_bands_per_freq,
+                                std::vector<std::vector<float>>& stems_interleaved_host,
+                                CudaPostStageMs& timings);
+
 private:
     struct Impl;
     Impl* impl_;

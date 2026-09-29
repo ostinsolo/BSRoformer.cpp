@@ -6,7 +6,18 @@ find_package(CUDAToolkit REQUIRED)
 add_executable(cuda_batched_post_bench
     main.cpp
     cuda_post_pipeline.cu
+    cpu_istft_reference.cpp
     ../../src/audio.cpp
+)
+
+add_executable(fft_regression_test
+    fft_regression_test.cpp
+    cpu_istft_reference.cpp
+)
+target_link_libraries(fft_regression_test PRIVATE CUDA::cudart CUDA::cufft)
+target_include_directories(fft_regression_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include
 )
 
 target_include_directories(cuda_batched_post_bench PRIVATE

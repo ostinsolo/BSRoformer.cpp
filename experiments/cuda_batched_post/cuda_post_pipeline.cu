@@ -85,20 +85,17 @@ __global__ void pack_ifft_input_kernel(const float* __restrict__ planar,
                                        int n_frames,
                                        int n_freq,
                                        int n_fft) {
-    const int f = blockIdx.x * blockDim.x + threadIdx.x;
-    if (f >= n_frames) return;
-    cufftComplex* row = batch_in + f * n_fft;
+    const int fr = blockIdx.x * blockDim.x + threadIdx.x;
+    if (fr >= n_frames) return;
+    cufftComplex* row = batch_in + static_cast<size_t>(fr) * n_fft;
     for (int k = 0; k < n_fft; ++k) row[k] = cufftComplex{0.0f, 0.0f};
     for (int k = 0; k < n_freq; ++k) {
-        const int idx = (k * n_frames + f) * 2;
+        const int idx = (k * n_frames + fr) * 2;
         row[k] = cufftComplex{planar[idx + 0], planar[idx + 1]};
     }
-    for (int k = n_freq; k < n_fft; ++k) {
-        const int mirror = n_fft - k;
-        if (mirror >= 0 && mirror < n_freq) {
-            const int idx = (mirror * n_frames + f) * 2;
-            row[k] = cufftComplex{planar[idx + 0], -planar[idx + 1]};
-        }
+    for (int i = n_freq; i < n_fft; ++i) {
+        const cufftComplex src = row[n_fft - i];
+        row[i] = cufftComplex{src.x, -src.y};
     }
 }
 
@@ -193,14 +190,12 @@ struct CudaPostPipeline::Impl {
         if (!d_audio) CUDA_CHECK(cudaMalloc(&d_audio, sizeof(float) * cfg.output_length));
         if (!d_window) {
             CUDA_CHECK(cudaMalloc(&d_window, sizeof(float) * cfg.n_fft));
-            std::vector<float> win(cfg.n_fft, 0.0f);
+            std::vector<float> win(static_cast<size_t>(cfg.n_fft), 0.0f);
             const int left = (cfg.n_fft - cfg.win_length) / 2;
+            const int divisor = cfg.win_length;
             for (int i = 0; i < cfg.win_length; ++i) {
-                const double pi = std::acos(-1.0);
-                const double n = static_cast<double>(1 - cfg.win_length + 2 * i);
-                const double denom = static_cast<double>(cfg.win_length - 1);
-                win[static_cast<size_t>(left + i)] =
-                    static_cast<float>(0.5 * (1.0 - std::cos(2.0 * pi * n / denom)));
+                win[static_cast<size_t>(left + i)] = static_cast<float>(
+                    0.5f * (1.0f - std::cos(2.0f * 3.14159265358979323846f * i / divisor)));
             }
             CUDA_CHECK(cudaMemcpy(d_window, win.data(), sizeof(float) * cfg.n_fft, cudaMemcpyHostToDevice));
         }
@@ -389,6 +384,20 @@ bool CudaPostPipeline::run_mode_b(const std::vector<std::vector<float>>& stft_ho
                                   const std::vector<int>& num_bands_per_freq,
                                   std::vector<std::vector<float>>& stems_interleaved_host,
                                   CudaPostStageMs& timings) {
+    return run_core(nullptr, stft_host, freq_indices, num_bands_per_freq, stems_interleaved_host,
+                    timings);
+}
+
+bool CudaPostPipeline::run_mode_b_device_mask(float* mask_device,
+                                                size_t mask_bytes,
+                                                const std::vector<std::vector<float>>& stft_host,
+                                                const std::vector<int>& freq_indices,
+                                                const std::vector<int>& num_bands_per_freq,
+                                                std::vector<std::vector<float>>& stems_interleaved_host,
+                                                CudaPostStageMs& timings) {
+    if (!mask_device || mask_bytes == 0) return false;
+    impl_->ensure_buffers(mask_bytes, 0, 0);
+    CUDA_CHECK(cudaMemcpy(impl_->d_mask, mask_device, mask_bytes, cudaMemcpyDeviceToDevice));
     return run_core(nullptr, stft_host, freq_indices, num_bands_per_freq, stems_interleaved_host,
                     timings);
 }

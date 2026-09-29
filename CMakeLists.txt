@@ -12,6 +12,7 @@ option(GGML_CUDA "Enable CUDA backend" ON)
 option(BSR_BUILD_TESTS "Build tests" OFF)
 option(BSR_BUILD_CLI "Build CLI application" ON)
 option(BSR_BUILD_CUDA_POST_EXPERIMENT "Build native CUDA batched post benchmark" OFF)
+option(BSR_ENABLE_CUDA_POST "Integrate validated CUDA post into inference" OFF)
 
 #================================================
 # Dependencies - GGML (Flexible Resolution)
@@ -93,7 +94,7 @@ endif()
 
 # Compiler options
 if(MSVC)
-    target_compile_options(bs_roformer PRIVATE /W3 /utf-8)
+    target_compile_options(bs_roformer PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W3 /utf-8>)
 else()
     target_compile_options(bs_roformer PRIVATE -Wall -Wextra)
 endif()
@@ -180,6 +181,18 @@ endif()
 #================================================
 # Tests (Optional)
 #================================================
+
+if(BSR_ENABLE_CUDA_POST AND GGML_CUDA)
+    enable_language(CUDA)
+    target_sources(bs_roformer PRIVATE
+        src/cuda_post_bridge.cpp
+        experiments/cuda_batched_post/cuda_post_pipeline.cu
+        experiments/cuda_batched_post/cpu_istft_reference.cpp
+    )
+    target_compile_definitions(bs_roformer PRIVATE BSR_CUDA_POST)
+    target_link_libraries(bs_roformer PUBLIC CUDA::cufft CUDA::cudart)
+    message(STATUS "CUDA post in inference: ENABLED")
+endif()
 
 if(BSR_BUILD_CUDA_POST_EXPERIMENT AND GGML_CUDA)
     enable_language(CUDA)

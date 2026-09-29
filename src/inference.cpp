@@ -18,6 +18,11 @@
 #include <exception>
 #include <stdexcept>
 
+#ifdef BSR_CUDA_POST
+#include "cuda_post_bridge.h"
+#include <cuda_runtime.h>
+#endif
+
 using Complex = std::complex<float>;
 static constexpr const char* kInferenceCancelledMessage = "Inference cancelled";
 
@@ -68,6 +73,9 @@ std::vector<float> GetWindow(int size, int fade_size) {
 Inference::Inference(const std::string& model_path) {
     model_ = std::make_unique<BSRoformer>();
     model_->Initialize(model_path);
+#ifdef BSR_CUDA_POST
+    SetUseCudaPost(true);
+#endif
 }
 
 int Inference::GetDefaultChunkSize() const {
@@ -94,6 +102,17 @@ const std::vector<int>& Inference::GetFreqIndices() const { return model_->GetFr
 const std::vector<int>& Inference::GetNumBandsPerFreq() const {
     return model_->GetNumBandsPerFreq();
 }
+
+void Inference::SetUseCudaPost(bool enabled) {
+#ifdef BSR_CUDA_POST
+    use_cuda_post_ = enabled && cuda_post_bridge::available();
+    cuda_post_bridge::set_enabled(use_cuda_post_);
+#else
+    use_cuda_post_ = false;
+#endif
+}
+
+bool Inference::GetUseCudaPost() const { return use_cuda_post_; }
 
 Inference::ChunkForwardArtifacts Inference::CaptureChunkForward(
     const std::vector<float>& chunk_audio) {
@@ -474,12 +493,24 @@ void Inference::RunInference(std::shared_ptr<ChunkState> state) {
     const auto t_graph1 = std::chrono::steady_clock::now();
     state->graph_ms = wall_ms(t_graph0, t_graph1);
 
-    // 6. Device -> Host
-    state->mask_output.resize(ggml_nelements(graph->mask_out_tensor));
-    const auto t_d2h0 = std::chrono::steady_clock::now();
-    ggml_backend_tensor_get(graph->mask_out_tensor, state->mask_output.data(), 0, output_bytes);
-    const auto t_d2h1 = std::chrono::steady_clock::now();
-    state->d2h_ms = wall_ms(t_d2h0, t_d2h1);
+    state->mask_on_device = false;
+    state->mask_device_ptr = nullptr;
+    state->mask_device_bytes = output_bytes;
+#ifdef BSR_CUDA_POST
+    if (use_cuda_post_ && graph->mask_out_tensor && graph->mask_out_tensor->data) {
+        state->mask_device_ptr = graph->mask_out_tensor->data;
+        state->mask_on_device = true;
+        state->d2h_ms = 0.0;
+        state->mask_d2d_ms = 0.0;
+    } else
+#endif
+    {
+        state->mask_output.resize(ggml_nelements(graph->mask_out_tensor));
+        const auto t_d2h0 = std::chrono::steady_clock::now();
+        ggml_backend_tensor_get(graph->mask_out_tensor, state->mask_output.data(), 0, output_bytes);
+        const auto t_d2h1 = std::chrono::steady_clock::now();
+        state->d2h_ms = wall_ms(t_d2h0, t_d2h1);
+    }
 
     if (status != GGML_STATUS_SUCCESS) {
         throw std::runtime_error(std::string("GGML graph compute failed: ") + ggml_status_to_string(status));
@@ -487,10 +518,32 @@ void Inference::RunInference(std::shared_ptr<ChunkState> state) {
 }
 
 void Inference::PostProcessChunk(std::shared_ptr<ChunkState> state, CpuScratch& scratch) {
-    if (!state || state->mask_output.empty()) return;
-
-    // 7. Post-Process & ISTFT
-    PostProcessAndISTFT(state->mask_output, state->stft_outputs, state->n_frames, state->final_audio, scratch);
+    if (!state) return;
+#ifdef BSR_CUDA_POST
+    if (use_cuda_post_ && state->mask_on_device && state->mask_device_ptr) {
+        const int out_len = static_cast<int>(state->input_audio.size() / 2);
+        double post_ms = 0.0;
+        if (cuda_post_bridge::post_process(
+                static_cast<float*>(state->mask_device_ptr), state->mask_device_bytes,
+                state->stft_outputs, state->n_frames, model_->GetNFFT(), model_->GetHopLength(),
+                model_->GetWinLength(), model_->GetNumStems(), out_len, model_->GetZeroDC(),
+                model_->GetFreqIndices(), model_->GetNumBandsPerFreq(), state->final_audio,
+                &post_ms)) {
+            (void)post_ms;
+        } else {
+            state->mask_output.resize(state->mask_device_bytes / sizeof(float));
+            cudaMemcpy(state->mask_output.data(), state->mask_device_ptr, state->mask_device_bytes,
+                       cudaMemcpyDeviceToHost);
+            PostProcessAndISTFT(state->mask_output, state->stft_outputs, state->n_frames,
+                                state->final_audio, scratch);
+        }
+    } else
+#endif
+    {
+        if (state->mask_output.empty()) return;
+        PostProcessAndISTFT(state->mask_output, state->stft_outputs, state->n_frames, state->final_audio,
+                          scratch);
+    }
 
     // 8. Trim
     for (auto& stem_audio : state->final_audio) {
