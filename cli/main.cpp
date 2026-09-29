@@ -125,6 +125,11 @@ bool backendIsCuda(const std::string& name) {
     return name.find("CUDA") != std::string::npos;
 }
 
+bool backendOkForBenchmark(const std::string& name) {
+    if (backendIsCuda(name)) return true;
+    return name == "CPU" || name.rfind("CPU", 0) == 0;
+}
+
 void appendJsonString(std::ostringstream& out, const std::string& value) {
     out << '"';
     for (char c : value) {
@@ -166,8 +171,8 @@ int runProbe(Inference& engine, const AudioBuffer& audio, int samples, const std
 int runBench(Inference& engine, const AudioBuffer& audio, int repeats, int only_samples) {
     const std::string backend = engine.GetBackendName();
     std::cerr << "Backend: " << backend << std::endl;
-    if (!backendIsCuda(backend)) {
-        std::cerr << "Error: expected a CUDA backend, got " << backend << std::endl;
+    if (!backendOkForBenchmark(backend)) {
+        std::cerr << "Error: unsupported backend for --bench, got " << backend << std::endl;
         return 2;
     }
     if (repeats < 1) repeats = 1;
@@ -269,8 +274,8 @@ int runProcessBench(Inference& engine, const AudioBuffer& audio, int chunk_size,
                     int process_repeats, const std::string& model_path) {
     const std::string backend = engine.GetBackendName();
     std::cerr << "Backend: " << backend << std::endl;
-    if (!backendIsCuda(backend)) {
-        std::cerr << "Error: expected a CUDA backend, got " << backend << std::endl;
+    if (!backendOkForBenchmark(backend)) {
+        std::cerr << "Error: unsupported backend for --process-bench, got " << backend << std::endl;
         return 2;
     }
     if (process_repeats < 1) process_repeats = 1;
@@ -352,7 +357,7 @@ double percentileSorted(const std::vector<double>& sorted, double p) {
 int runLiveStress(Inference& engine, const AudioBuffer& audio, int samples, int iters) {
     const std::string backend = engine.GetBackendName();
     std::cerr << "Backend: " << backend << std::endl;
-    if (!backendIsCuda(backend)) return 2;
+    if (!backendOkForBenchmark(backend)) return 2;
     if (iters < 1) iters = 1;
     const int frames = frameCount(audio);
     if (frames < samples) {
@@ -411,8 +416,8 @@ int runSeparate(Inference& engine, const AudioBuffer& audio, const std::string& 
                  int chunk_samples, int step_samples) {
     const std::string backend = engine.GetBackendName();
     std::cerr << "Backend: " << backend << std::endl;
-    if (!backendIsCuda(backend)) {
-        std::cerr << "Error: expected a CUDA backend, got " << backend << std::endl;
+    if (!backendOkForBenchmark(backend)) {
+        std::cerr << "Error: unsupported backend for --separate, got " << backend << std::endl;
         return 2;
     }
     if (chunk_samples <= 0) chunk_samples = kTeacherChunk;
@@ -607,8 +612,8 @@ int main(int argc, char* argv[]) {
         const std::string output_path = positional[2];
         AudioBuffer input_audio = loadStereo44100(engine, input_path);
         std::cerr << "Backend: " << engine.GetBackendName() << std::endl;
-        if (!backendIsCuda(engine.GetBackendName())) {
-            std::cerr << "Error: expected a CUDA backend" << std::endl;
+        if (!backendOkForBenchmark(engine.GetBackendName())) {
+            std::cerr << "Error: unsupported backend for file Process()" << std::endl;
             return 2;
         }
 
