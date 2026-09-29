@@ -494,6 +494,7 @@ int main(int argc, char* argv[]) {
     int separate_chunk = 0;
     int separate_step = 0;
     int bench_only = 0;
+    int ggml_threads = 0;
     int probe_samples = 0;
     std::string probe_dir;
     std::string separate_dir;
@@ -533,6 +534,8 @@ int main(int argc, char* argv[]) {
             repeats = std::stoi(argv[++i]);
         } else if (arg == "--bench-samples" && i + 1 < argc) {
             bench_only = std::stoi(argv[++i]);
+        } else if (arg == "--ggml-threads" && i + 1 < argc) {
+            ggml_threads = std::stoi(argv[++i]);
         } else if (arg == "--separate") {
             separate = true;
         } else if (arg == "--chunk-samples" && i + 1 < argc) {
@@ -561,6 +564,14 @@ int main(int argc, char* argv[]) {
         const std::string model_path = positional[0];
         std::cerr << "Initializing BSRoformer..." << std::endl;
         Inference engine(model_path);
+        if (ggml_threads > 0) {
+            engine.SetGgmlThreads(ggml_threads);
+        } else {
+            const char* omp = std::getenv("OMP_NUM_THREADS");
+            if (omp && *omp) {
+                engine.SetGgmlThreads(std::stoi(omp));
+            }
+        }
         if (gpu_post) engine.SetUseCudaPost(true);
         if (cpu_post) engine.SetUseCudaPost(false);
         if (!chunk_size_set) chunk_size = engine.GetDefaultChunkSize();

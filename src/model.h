@@ -28,7 +28,11 @@ public:
 
     // Initialize model from GGUF file
     void Initialize(const std::string& model_path);
-    
+
+    // GGML CPU graph thread count (ignored on CUDA). Default GGML_DEFAULT_N_THREADS until set.
+    void SetGraphThreads(int n_threads);
+    int GetGraphThreads() const { return graph_threads_; }
+
     // ========== Accessors for weights and config ==========
     
     // Get weight tensor by name
@@ -126,12 +130,15 @@ public:
     );
 
 private:
+    void ApplyGraphThreadsToBackend();
+
     // GGML Contexts
     ggml_context* ctx_weights_ = nullptr;
 
     // Backend
     ggml_backend_t backend_ = nullptr;
     ggml_backend_buffer_t buffer_weights_ = nullptr;
+    int graph_threads_ = 0;
 
     // Model Config
     int dim_ = 384;

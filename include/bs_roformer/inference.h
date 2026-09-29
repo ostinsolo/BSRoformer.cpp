@@ -78,6 +78,9 @@ public:
     void SetUseCudaPost(bool enabled);
     bool GetUseCudaPost() const;
 
+    void SetGgmlThreads(int n_threads);
+    int GetGgmlThreads() const;
+
     // Low-level chunk processing (public for testing)
     std::vector<std::vector<float>> ProcessChunk(const std::vector<float>& chunk_audio);
     std::vector<std::vector<float>> ProcessChunk(const std::vector<float>& chunk_audio,

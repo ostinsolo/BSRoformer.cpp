@@ -2,6 +2,7 @@
 #include <ggml.h>
 #include <ggml-alloc.h>
 #include <ggml-backend.h>
+#include <ggml-cpu.h>
 #include <gguf.h>
 #include <iostream>
 #include <stdexcept>
@@ -100,8 +101,27 @@ void BSRoformer::Initialize(const std::string& model_path) {
         throw std::runtime_error("Failed to initialize ggml backend");
     }
     std::cout << "Using backend: " << ggml_backend_name(backend_) << std::endl;
+    ApplyGraphThreadsToBackend();
 
     LoadWeights(model_path);
+}
+
+void BSRoformer::SetGraphThreads(int n_threads) {
+    if (n_threads < 1) {
+        n_threads = GGML_DEFAULT_N_THREADS;
+    }
+    graph_threads_ = n_threads;
+    ApplyGraphThreadsToBackend();
+}
+
+void BSRoformer::ApplyGraphThreadsToBackend() {
+    if (!backend_ || graph_threads_ < 1) {
+        return;
+    }
+    if (ggml_backend_is_cpu(backend_)) {
+        ggml_backend_cpu_set_n_threads(backend_, graph_threads_);
+        std::cout << "GGML CPU graph threads: " << graph_threads_ << std::endl;
+    }
 }
 
 void BSRoformer::LoadWeights(const std::string& path) {

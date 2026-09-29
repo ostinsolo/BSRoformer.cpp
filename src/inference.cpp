@@ -114,6 +114,12 @@ void Inference::SetUseCudaPost(bool enabled) {
 
 bool Inference::GetUseCudaPost() const { return use_cuda_post_; }
 
+void Inference::SetGgmlThreads(int n_threads) {
+    model_->SetGraphThreads(n_threads);
+}
+
+int Inference::GetGgmlThreads() const { return model_->GetGraphThreads(); }
+
 Inference::ChunkForwardArtifacts Inference::CaptureChunkForward(
     const std::vector<float>& chunk_audio) {
     ChunkForwardArtifacts out;
