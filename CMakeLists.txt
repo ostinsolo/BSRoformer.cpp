@@ -166,6 +166,7 @@ if(BSR_BUILD_CLI)
     target_include_directories(bs_roformer-cli PRIVATE 
         src 
         third_party
+        "${CMAKE_CURRENT_SOURCE_DIR}/../backends/roformer-mlx-cpp/include"
     )
     
     if(MSVC)

@@ -14,6 +14,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <chrono>
 #include <exception>
 #include <stdexcept>
 
@@ -374,6 +375,18 @@ std::shared_ptr<Inference::ChunkState> Inference::PreProcessChunk(const std::vec
     return state;
 }
 
+Inference::ChunkProbe Inference::ProbeChunk(const std::vector<float>& chunk_audio) {
+    ChunkProbe probe;
+    CpuScratch scratch;
+    auto state = PreProcessChunk(chunk_audio, 0, scratch);
+    probe.n_frames = state->n_frames;
+    probe.num_freq_indices = static_cast<int>(model_->GetFreqIndices().size());
+    probe.stft_flattened = state->stft_flattened;
+    RunInference(state);
+    probe.mask_output = state->mask_output;
+    return probe;
+}
+
 void Inference::RunInference(std::shared_ptr<ChunkState> state) {
     if (!state || state->stft_flattened.empty()) return;
 
@@ -410,17 +423,34 @@ void Inference::RunInference(std::shared_ptr<ChunkState> state) {
     const size_t pos_freq_bytes = ggml_nbytes(graph->pos_freq);
     const size_t output_bytes = ggml_nbytes(graph->mask_out_tensor);
 
+    state->h2d_ms = 0.0;
+    state->graph_ms = 0.0;
+    state->d2h_ms = 0.0;
+
+    auto wall_ms = [](auto a, auto b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+
     // 4. Host -> Device
+    const auto t_h2d0 = std::chrono::steady_clock::now();
     ggml_backend_tensor_set(graph->input_tensor, state->stft_flattened.data(), 0, input_bytes);
     ggml_backend_tensor_set(graph->pos_time, graph->pos_time_data.data(), 0, pos_time_bytes);
     ggml_backend_tensor_set(graph->pos_freq, graph->pos_freq_data.data(), 0, pos_freq_bytes);
+    const auto t_h2d1 = std::chrono::steady_clock::now();
+    state->h2d_ms = wall_ms(t_h2d0, t_h2d1);
 
     // 5. Compute
+    const auto t_graph0 = std::chrono::steady_clock::now();
     enum ggml_status status = ggml_backend_graph_compute(backend, graph->gf);
+    const auto t_graph1 = std::chrono::steady_clock::now();
+    state->graph_ms = wall_ms(t_graph0, t_graph1);
 
     // 6. Device -> Host
     state->mask_output.resize(ggml_nelements(graph->mask_out_tensor));
+    const auto t_d2h0 = std::chrono::steady_clock::now();
     ggml_backend_tensor_get(graph->mask_out_tensor, state->mask_output.data(), 0, output_bytes);
+    const auto t_d2h1 = std::chrono::steady_clock::now();
+    state->d2h_ms = wall_ms(t_d2h0, t_d2h1);
 
     if (status != GGML_STATUS_SUCCESS) {
         throw std::runtime_error(std::string("GGML graph compute failed: ") + ggml_status_to_string(status));
@@ -443,13 +473,48 @@ void Inference::PostProcessChunk(std::shared_ptr<ChunkState> state, CpuScratch& 
     }
 }
 
+std::string Inference::GetBackendName() const {
+    if (!model_ || !model_->GetBackend()) {
+        return "none";
+    }
+    const char* name = ggml_backend_name(model_->GetBackend());
+    return name ? std::string(name) : std::string("none");
+}
+
 std::vector<std::vector<float>> Inference::ProcessChunk(const std::vector<float>& chunk_audio) {
-    // Serial fallback
+    ChunkStageMs unused;
+    return ProcessChunk(chunk_audio, unused);
+}
+
+std::vector<std::vector<float>> Inference::ProcessChunk(const std::vector<float>& chunk_audio,
+                                                        ChunkStageMs& stages) {
     CpuScratch preprocess_scratch;
     CpuScratch postprocess_scratch;
-    auto state = PreProcessChunk(chunk_audio, 0, preprocess_scratch);
+    const auto ms = [](auto a, auto b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    auto state = std::make_shared<ChunkState>();
+    state->input_audio = chunk_audio;
+    if (chunk_audio.empty()) {
+        return {};
+    }
+    const auto t_stft0 = std::chrono::steady_clock::now();
+    ComputeSTFT(state->input_audio, state->stft_outputs, state->n_frames, preprocess_scratch);
+    const auto t_stft1 = std::chrono::steady_clock::now();
+    const auto t_pack0 = std::chrono::steady_clock::now();
+    PrepareModelInput(state->stft_outputs, state->n_frames, state->stft_flattened);
+    const auto t_pack1 = std::chrono::steady_clock::now();
     RunInference(state);
+    const auto t2 = std::chrono::steady_clock::now();
     PostProcessChunk(state, postprocess_scratch);
+    const auto t3 = std::chrono::steady_clock::now();
+    stages.stft_ms = ms(t_stft0, t_stft1);
+    stages.pack_ms = ms(t_pack0, t_pack1);
+    stages.h2d_ms = state->h2d_ms;
+    stages.graph_ms = state->graph_ms;
+    stages.d2h_ms = state->d2h_ms;
+    stages.forward_ms = state->h2d_ms + state->graph_ms + state->d2h_ms;
+    stages.post_ms = ms(t2, t3);
     return state->final_audio;
 }
 

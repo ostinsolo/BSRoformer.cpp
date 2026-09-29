@@ -32,8 +32,34 @@ public:
                                std::function<void(float)> progress_callback = nullptr,
                                CancelCallback cancel_callback = nullptr);
 
+    // Stage split for one ProcessChunk call. forward_ms includes host/device copies
+    // around ggml_backend_graph_compute. stft_ms is STFT plus model-input pack.
+    // post_ms is mask apply plus iSTFT.
+    struct ChunkStageMs {
+        double stft_ms = 0.0;
+        double pack_ms = 0.0;
+        double h2d_ms = 0.0;
+        double graph_ms = 0.0;
+        double d2h_ms = 0.0;
+        double forward_ms = 0.0;
+        double post_ms = 0.0;
+    };
+
+    struct ChunkProbe {
+        int n_frames = 0;
+        int num_freq_indices = 0;
+        std::vector<float> stft_flattened;
+        std::vector<float> mask_output;
+    };
+
+    ChunkProbe ProbeChunk(const std::vector<float>& chunk_audio);
+
     // Low-level chunk processing (public for testing)
     std::vector<std::vector<float>> ProcessChunk(const std::vector<float>& chunk_audio);
+    std::vector<std::vector<float>> ProcessChunk(const std::vector<float>& chunk_audio,
+                                                  ChunkStageMs& stages);
+
+    std::string GetBackendName() const;
 
     // Get model's recommended inference defaults
     int GetDefaultChunkSize() const;
@@ -90,6 +116,9 @@ private:
         
         std::vector<float> mask_output;       // Output from GPU
         std::vector<std::vector<float>> final_audio;       // Result after ISTFT [stems][samples]
+        double h2d_ms = 0.0;
+        double graph_ms = 0.0;
+        double d2h_ms = 0.0;
     };
 
     // Helper to ensure graph is built for specific n_frames
