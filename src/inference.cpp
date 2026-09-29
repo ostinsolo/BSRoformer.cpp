@@ -86,6 +86,35 @@ int Inference::GetNumStems() const {
     return model_->GetNumStems();
 }
 
+int Inference::GetNFFT() const { return model_->GetNFFT(); }
+int Inference::GetHopLength() const { return model_->GetHopLength(); }
+int Inference::GetWinLength() const { return model_->GetWinLength(); }
+bool Inference::GetZeroDC() const { return model_->GetZeroDC(); }
+const std::vector<int>& Inference::GetFreqIndices() const { return model_->GetFreqIndices(); }
+const std::vector<int>& Inference::GetNumBandsPerFreq() const {
+    return model_->GetNumBandsPerFreq();
+}
+
+Inference::ChunkForwardArtifacts Inference::CaptureChunkForward(
+    const std::vector<float>& chunk_audio) {
+    ChunkForwardArtifacts out;
+    CpuScratch scratch;
+    auto state = PreProcessChunk(chunk_audio, 0, scratch);
+    out.n_frames = state->n_frames;
+    out.stft_outputs = state->stft_outputs;
+    RunInference(state);
+    out.mask_output = state->mask_output;
+    return out;
+}
+
+void Inference::PostProcessCpu(const std::vector<float>& mask_output,
+                               const std::vector<std::vector<float>>& stft_outputs,
+                               int n_frames,
+                               std::vector<std::vector<float>>& output_audio) {
+    CpuScratch scratch;
+    PostProcessAndISTFT(mask_output, stft_outputs, n_frames, output_audio, scratch);
+}
+
 Inference::~Inference() {
     ClearGraphCache();
 }

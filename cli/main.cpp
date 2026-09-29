@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <numeric>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -15,6 +16,7 @@
 namespace {
 
 constexpr int kBenchWindows[] = {81920, 102400, 153600, 204800, 307200, 409600};
+constexpr int kLiveHopSamples = 12288;
 constexpr int kTeacherChunk = 409600;
 constexpr int kTeacherStep = 352800;
 constexpr const char* kStemNames[] = {
@@ -23,11 +25,17 @@ constexpr const char* kStemNames[] = {
 void print_usage(const char* program_name) {
     std::cerr << "Usage: " << program_name << " <model.gguf> <input.wav> <output.wav> [options]\n";
     std::cerr << "       " << program_name << " <model.gguf> --bench <input.wav> [--repeats N]\n";
+    std::cerr << "       " << program_name << " <model.gguf> --process-bench <input.wav>\n";
     std::cerr << "       " << program_name << " <model.gguf> --separate <input.wav> <out_dir>\n\n";
     std::cerr << "Options:\n";
     std::cerr << "  --chunk-size <N>   Chunk size in samples (default: from model, fallback 352800)\n";
     std::cerr << "  --overlap <N>      Number of overlaps for crossfade (default: from model, fallback 2)\n";
     std::cerr << "  --bench <wav>      Warm stage-timing ladder (81920 .. 409600) on the WAV\n";
+    std::cerr << "  --process-bench <wav>\n";
+    std::cerr << "                     Wall-clock Process() / ProcessOverlapAddPipelined (JSON stdout)\n";
+    std::cerr << "  --process-repeats <N>  Timed full-file repeats after one warmup (default 1)\n";
+    std::cerr << "  --live-stress <wav> 81920 jitter JSON (use --stress-iters)\n";
+    std::cerr << "  --stress-iters <N> Live stress iterations (default 1000)\n";
     std::cerr << "  --repeats <N>      Timed repeats per window after one warmup (default 3)\n";
     std::cerr << "  --separate <wav> <dir>\n";
     std::cerr << "                     Offline Hamming OLA, one WAV per stem\n";
@@ -115,6 +123,16 @@ std::vector<float> interleavedWindow(const AudioBuffer& audio, int start, int fr
 
 bool backendIsCuda(const std::string& name) {
     return name.find("CUDA") != std::string::npos;
+}
+
+void appendJsonString(std::ostringstream& out, const std::string& value) {
+    out << '"';
+    for (char c : value) {
+        if (c == '\\' || c == '"') out << '\\' << c;
+        else if (c == '\n') out << "\\n";
+        else out << c;
+    }
+    out << '"';
 }
 
 void writeFloatBinary(const std::filesystem::path& path, const std::vector<float>& data) {
@@ -231,9 +249,160 @@ int runBench(Inference& engine, const AudioBuffer& audio, int repeats, int only_
              << ", \"median_d2h_ms\": " << medianOf(d2h)
              << ", \"median_post_ms\": " << medianOf(post)
              << ", \"rtf\": " << rtf
-             << ", \"warmup_abs_energy\": " << warm_energy << "}";
+             << ", \"warmup_abs_energy\": " << warm_energy;
+        if (samples == 81920) {
+            const double deadline_ms =
+                (static_cast<double>(kLiveHopSamples) / static_cast<double>(sample_rate)) * 1000.0;
+            json << ", \"live_hop_samples\": " << kLiveHopSamples
+                 << ", \"deadline_ms\": " << deadline_ms
+                 << ", \"deadline_utilisation\": " << (med_e2e / deadline_ms)
+                 << ", \"deadline_headroom\": " << (deadline_ms / med_e2e);
+        }
+        json << "}";
     }
     json << "\n  ]\n}\n";
+    std::cout << json.str();
+    return 0;
+}
+
+int runProcessBench(Inference& engine, const AudioBuffer& audio, int chunk_size, int num_overlap,
+                    int process_repeats, const std::string& model_path) {
+    const std::string backend = engine.GetBackendName();
+    std::cerr << "Backend: " << backend << std::endl;
+    if (!backendIsCuda(backend)) {
+        std::cerr << "Error: expected a CUDA backend, got " << backend << std::endl;
+        return 2;
+    }
+    if (process_repeats < 1) process_repeats = 1;
+    const int frames = frameCount(audio);
+    const int sample_rate = engine.GetSampleRate();
+    const double audio_sec = static_cast<double>(frames) / static_cast<double>(sample_rate);
+
+    std::cerr << "Process-bench chunk_size=" << chunk_size << " overlap=" << num_overlap
+              << " frames=" << frames << std::endl;
+
+    auto run_once = [&]() -> double {
+        const auto t0 = std::chrono::high_resolution_clock::now();
+        const auto stems =
+            engine.Process(audio.data, chunk_size, num_overlap, nullptr);
+        const auto t1 = std::chrono::high_resolution_clock::now();
+        if (stems.empty() || stems[0].empty()) {
+            throw std::runtime_error("Process() returned empty stems");
+        }
+        double energy = 0.0;
+        for (const auto& stem : stems) {
+            for (float s : stem) energy += std::fabs(s);
+        }
+        if (energy <= 0.0) {
+            throw std::runtime_error("Process() output energy is zero");
+        }
+        return std::chrono::duration<double, std::milli>(t1 - t0).count();
+    };
+
+    const double warm_ms = run_once();
+    std::cerr << "  warmup_wall_ms=" << warm_ms << std::endl;
+
+    std::vector<double> walls;
+    walls.reserve(static_cast<size_t>(process_repeats));
+    for (int r = 0; r < process_repeats; ++r) {
+        const double ms = run_once();
+        walls.push_back(ms);
+        std::cerr << "  repeat " << (r + 1) << " wall_ms=" << ms << std::endl;
+    }
+    const double med_wall_ms = medianOf(walls);
+    const double med_wall_sec = med_wall_ms / 1000.0;
+    const double rtf = med_wall_sec / audio_sec;
+    const double speed_x = 1.0 / rtf;
+
+    std::ostringstream json;
+    json << "{\n"
+         << "  \"mode\": \"process_overlap_add_pipelined\",\n"
+         << "  \"model_gguf\": ";
+    appendJsonString(json, model_path);
+    json << ",\n"
+         << "  \"backend\": \"" << backend << "\",\n"
+         << "  \"sample_rate\": " << sample_rate << ",\n"
+         << "  \"input_frames_per_channel\": " << frames << ",\n"
+         << "  \"input_duration_sec\": " << audio_sec << ",\n"
+         << "  \"chunk_size\": " << chunk_size << ",\n"
+         << "  \"num_overlap\": " << num_overlap << ",\n"
+         << "  \"process_repeats\": " << process_repeats << ",\n"
+         << "  \"warmup_wall_ms\": " << warm_ms << ",\n"
+         << "  \"median_wall_ms\": " << med_wall_ms << ",\n"
+         << "  \"median_wall_sec\": " << med_wall_sec << ",\n"
+         << "  \"rtf\": " << rtf << ",\n"
+         << "  \"speed_x_realtime\": " << speed_x << "\n"
+         << "}\n";
+    std::cout << json.str();
+    return 0;
+}
+
+double percentileSorted(const std::vector<double>& sorted, double p) {
+    if (sorted.empty()) return 0.0;
+    if (p <= 0.0) return sorted.front();
+    if (p >= 1.0) return sorted.back();
+    const double idx = p * static_cast<double>(sorted.size() - 1);
+    const int lo = static_cast<int>(std::floor(idx));
+    const int hi = static_cast<int>(std::ceil(idx));
+    if (lo == hi) return sorted[static_cast<size_t>(lo)];
+    const double t = idx - static_cast<double>(lo);
+    return sorted[static_cast<size_t>(lo)] * (1.0 - t) + sorted[static_cast<size_t>(hi)] * t;
+}
+
+int runLiveStress(Inference& engine, const AudioBuffer& audio, int samples, int iters) {
+    const std::string backend = engine.GetBackendName();
+    std::cerr << "Backend: " << backend << std::endl;
+    if (!backendIsCuda(backend)) return 2;
+    if (iters < 1) iters = 1;
+    const int frames = frameCount(audio);
+    if (frames < samples) {
+        throw std::runtime_error("WAV too short for live stress");
+    }
+    const auto window = interleavedWindow(audio, 0, samples);
+    const double deadline_ms =
+        (static_cast<double>(kLiveHopSamples) / static_cast<double>(engine.GetSampleRate())) * 1000.0;
+
+    Inference::ChunkStageMs warm_stage;
+    engine.ProcessChunk(window, warm_stage);
+
+    std::vector<double> e2e;
+    e2e.reserve(static_cast<size_t>(iters));
+    int over_deadline = 0;
+    for (int i = 0; i < iters; ++i) {
+        Inference::ChunkStageMs stage;
+        engine.ProcessChunk(window, stage);
+        const double ms = stage.stft_ms + stage.pack_ms + stage.forward_ms + stage.post_ms;
+        e2e.push_back(ms);
+        if (ms > deadline_ms) ++over_deadline;
+    }
+
+    std::vector<double> sorted = e2e;
+    std::sort(sorted.begin(), sorted.end());
+    const double sum = std::accumulate(sorted.begin(), sorted.end(), 0.0);
+    const double mean = sum / static_cast<double>(sorted.size());
+    double var = 0.0;
+    for (double v : sorted) {
+        const double d = v - mean;
+        var += d * d;
+    }
+    const double stddev = std::sqrt(var / static_cast<double>(sorted.size()));
+
+    std::ostringstream json;
+    json << "{\n"
+         << "  \"backend\": \"" << backend << "\",\n"
+         << "  \"samples\": " << samples << ",\n"
+         << "  \"live_hop_samples\": " << kLiveHopSamples << ",\n"
+         << "  \"deadline_ms\": " << deadline_ms << ",\n"
+         << "  \"iterations\": " << iters << ",\n"
+         << "  \"over_deadline_count\": " << over_deadline << ",\n"
+         << "  \"min_e2e_ms\": " << sorted.front() << ",\n"
+         << "  \"median_e2e_ms\": " << medianOf(sorted) << ",\n"
+         << "  \"mean_e2e_ms\": " << mean << ",\n"
+         << "  \"p95_e2e_ms\": " << percentileSorted(sorted, 0.95) << ",\n"
+         << "  \"p99_e2e_ms\": " << percentileSorted(sorted, 0.99) << ",\n"
+         << "  \"max_e2e_ms\": " << sorted.back() << ",\n"
+         << "  \"stddev_e2e_ms\": " << stddev << "\n"
+         << "}\n";
     std::cout << json.str();
     return 0;
 }
@@ -309,8 +478,12 @@ int main(int argc, char* argv[]) {
     bool chunk_size_set = false;
     bool num_overlap_set = false;
     bool bench = false;
+    bool process_bench = false;
+    bool live_stress = false;
     bool separate = false;
     int repeats = 3;
+    int process_repeats = 1;
+    int stress_iters = 1000;
     int separate_chunk = 0;
     int separate_step = 0;
     int bench_only = 0;
@@ -337,6 +510,14 @@ int main(int argc, char* argv[]) {
             num_overlap_set = true;
         } else if (arg == "--bench") {
             bench = true;
+        } else if (arg == "--process-bench") {
+            process_bench = true;
+        } else if (arg == "--live-stress") {
+            live_stress = true;
+        } else if (arg == "--stress-iters" && i + 1 < argc) {
+            stress_iters = std::stoi(argv[++i]);
+        } else if (arg == "--process-repeats" && i + 1 < argc) {
+            process_repeats = std::stoi(argv[++i]);
         } else if (arg == "--repeats" && i + 1 < argc) {
             repeats = std::stoi(argv[++i]);
         } else if (arg == "--bench-samples" && i + 1 < argc) {
@@ -385,6 +566,21 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             return runBench(engine, loadStereo44100(engine, positional[1]), repeats, bench_only);
+        }
+        if (process_bench) {
+            if (positional.size() < 2) {
+                print_usage(argv[0]);
+                return 1;
+            }
+            return runProcessBench(engine, loadStereo44100(engine, positional[1]), chunk_size,
+                                   num_overlap, process_repeats, model_path);
+        }
+        if (live_stress) {
+            if (positional.size() < 2) {
+                print_usage(argv[0]);
+                return 1;
+            }
+            return runLiveStress(engine, loadStereo44100(engine, positional[1]), 81920, stress_iters);
         }
         if (separate) {
             if (positional.size() < 3) {

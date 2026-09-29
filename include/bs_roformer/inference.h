@@ -54,6 +54,27 @@ public:
 
     ChunkProbe ProbeChunk(const std::vector<float>& chunk_audio);
 
+    struct ChunkForwardArtifacts {
+        int n_frames = 0;
+        std::vector<std::vector<float>> stft_outputs;
+        std::vector<float> mask_output;
+    };
+
+    // STFT + GGML forward without CPU post (for CUDA post benchmarks).
+    ChunkForwardArtifacts CaptureChunkForward(const std::vector<float>& chunk_audio);
+
+    void PostProcessCpu(const std::vector<float>& mask_output,
+                        const std::vector<std::vector<float>>& stft_outputs,
+                        int n_frames,
+                        std::vector<std::vector<float>>& output_audio);
+
+    int GetNFFT() const;
+    int GetHopLength() const;
+    int GetWinLength() const;
+    bool GetZeroDC() const;
+    const std::vector<int>& GetFreqIndices() const;
+    const std::vector<int>& GetNumBandsPerFreq() const;
+
     // Low-level chunk processing (public for testing)
     std::vector<std::vector<float>> ProcessChunk(const std::vector<float>& chunk_audio);
     std::vector<std::vector<float>> ProcessChunk(const std::vector<float>& chunk_audio,

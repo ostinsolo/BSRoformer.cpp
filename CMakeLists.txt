@@ -11,6 +11,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(GGML_CUDA "Enable CUDA backend" ON)
 option(BSR_BUILD_TESTS "Build tests" OFF)
 option(BSR_BUILD_CLI "Build CLI application" ON)
+option(BSR_BUILD_CUDA_POST_EXPERIMENT "Build native CUDA batched post benchmark" OFF)
 
 #================================================
 # Dependencies - GGML (Flexible Resolution)
@@ -179,6 +180,12 @@ endif()
 #================================================
 # Tests (Optional)
 #================================================
+
+if(BSR_BUILD_CUDA_POST_EXPERIMENT AND GGML_CUDA)
+    enable_language(CUDA)
+    add_subdirectory(experiments/cuda_batched_post)
+    message(STATUS "CUDA batched post experiment: ENABLED")
+endif()
 
 if(BSR_BUILD_TESTS)
     enable_testing()
